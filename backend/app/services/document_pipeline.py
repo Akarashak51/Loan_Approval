@@ -116,6 +116,8 @@ DEMO_STATEMENT_ALIASES = {
 
 def _demo_statement(user):
     """Match against the registered account name, never a document/OCR name."""
+    if not current_app.config.get("DEMO_STATEMENT_OVERRIDES", False):
+        return None
     registered_name = " ".join((user.full_name or "").split())
     normalized_name = registered_name.casefold()
     profile_name = DEMO_STATEMENT_ALIASES.get(
@@ -123,12 +125,9 @@ def _demo_statement(user):
     )
     match = DEMO_STATEMENTS.get(profile_name)
     current_app.logger.info(
-        "Temporary statement demo name check: user_id=%s "
-        "registered_full_name=%r normalized_name=%r matched_profile=%r",
+        "Temporary statement demo profile check: user_id=%s matched=%s",
         user.id,
-        user.full_name,
-        normalized_name,
-        profile_name if match else None,
+        bool(match),
     )
     return match
 

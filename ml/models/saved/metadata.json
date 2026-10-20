@@ -4,7 +4,7 @@
   "recall": 0.8214285714285714,
   "f1": 0.8098591549295775,
   "roc_auc": 0.7585714285714286,
-  "trained_at": "2026-10-14T01:23:56Z",
+  "trained_at": "2026-10-20T04:45:35Z",
   "dataset_size": 1000,
   "train_size": 800,
   "test_size": 200,
@@ -74,6 +74,6 @@
   "governance": {
     "passed": true,
     "failed_checks": [],
-    "checked_at": "2026-10-14T01:23:56Z"
+    "checked_at": "2026-10-20T04:45:35Z"
   }
 }

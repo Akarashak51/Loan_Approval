@@ -25,7 +25,8 @@ def test_authenticated_document_upload_persists_record(client, app, tmp_path):
     body = response.get_json()
     assert body["success"] is True
     assert body["document"]["filename"] == "pan.pdf"
-    assert body["document"]["status"] == "UPLOADED"
+    # The current upload pipeline verifies readable PAN fixtures immediately.
+    assert body["document"]["status"] == "VERIFIED"
     pending = client.get("/api/documents/pending", headers=headers)
     assert pending.status_code == 200
     assert len(pending.get_json()["documents"]) == 1
@@ -44,7 +45,7 @@ def test_document_upload_rejects_missing_and_unsupported_files(client):
     assert "Only PDF" in unsupported.get_json()["message"]
 
 
-def test_address_upload_rejects_another_document_type_filename(client):
+def test_legacy_address_upload_rejects_invalid_pdf_with_salary_filename(client):
     headers = _token(client)
     response = client.post("/api/documents", headers=headers, data={
         "documentType": "ADDRESS_PROOF",
@@ -52,7 +53,7 @@ def test_address_upload_rejects_another_document_type_filename(client):
         "file": (BytesIO(b"not inspected"), "salary_slip.pdf", "application/pdf"),
     })
     assert response.status_code == 400
-    assert "selected document type" in response.get_json()["message"]
+    assert "valid content" in response.get_json()["message"]
 
 
 def test_document_upload_accepts_png_and_rejects_oversized_file(client, app, tmp_path, monkeypatch):

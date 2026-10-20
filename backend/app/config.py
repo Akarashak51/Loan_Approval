@@ -62,6 +62,9 @@ class BaseConfig:
     DOCUMENT_OCR_RAW_DEBUG: bool = (
         os.environ.get("DOCUMENT_OCR_RAW_DEBUG", "false").lower() == "true"
     )
+    DEMO_STATEMENT_OVERRIDES: bool = (
+        os.environ.get("DEMO_STATEMENT_OVERRIDES", "false").lower() == "true"
+    )
     DOCUMENT_NAME_THRESHOLD: float = float(
         os.environ.get("DOCUMENT_NAME_THRESHOLD", "88")
     )

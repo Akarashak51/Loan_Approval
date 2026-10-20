@@ -157,6 +157,10 @@ OpenAI-compatible `OPENAI_API_KEY` is optional; grounded explanations use a
 deterministic template when it is not configured. Keep the key in
 `backend/.env`, never in the frontend environment.
 
+Name-based synthetic statement data and fixed presentation decisions are
+disabled by default. Set `DEMO_STATEMENT_OVERRIDES=true` only for a controlled
+demo; never enable it for real applicant decisions.
+
 ### 1. Configure the backend
 
 From the repository root, copy `.env.example` to `backend/.env` and set a real
@@ -168,7 +172,7 @@ commit `backend/.env`.
 PowerShell:
 
 ```powershell
-Copy-Item .env.example backend/.env
+if (-not (Test-Path backend/.env)) { Copy-Item .env.example backend/.env }
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
@@ -181,11 +185,15 @@ LLM explanation path.
 PowerShell (from the repository root):
 
 ```powershell
-py -3.11 -m venv backend/.venv
-backend/.venv/Scripts/Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r backend/requirements.txt
+& "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe" -m venv backend/.venv
+$projectPython = ".\backend\.venv\Scripts\python.exe"
+& $projectPython --version
+& $projectPython -m pip install --upgrade pip
+& $projectPython -m pip install -r backend/requirements.txt
 ```
+
+Use `$projectPython` for Python commands in PowerShell. This avoids using a
+different global Python and does not require PowerShell script activation.
 
 macOS/Linux:
 
@@ -209,14 +217,16 @@ SQLite development creates tables when the Flask app starts. For an existing
 Alembic-managed MySQL database, run from the repository root:
 
 ```powershell
-python -m flask --app backend.app db upgrade
+$projectPython = ".\backend\.venv\Scripts\python.exe"
+& $projectPython -m flask --app backend.app db upgrade
 ```
 
 If Flask cannot resolve the app package from the root, run the equivalent from
 `backend/`:
 
 ```powershell
-python -m flask --app app db upgrade
+$projectPython = ".\backend\.venv\Scripts\python.exe"
+& $projectPython -m flask --app app db upgrade
 ```
 
 Do not stamp an existing database without verifying that its schema matches
@@ -229,10 +239,22 @@ German Credit dataset; the transaction model generates clearly labeled
 synthetic data.
 
 ```powershell
-python ml/data/download_dataset.py
-python ml/training/train.py
-python ml/training/train_transaction_model.py
+$projectPython = ".\backend\.venv\Scripts\python.exe"
+& $projectPython ml/data/download_dataset.py
+& $projectPython ml/training/train.py
+& $projectPython ml/training/train_transaction_model.py
 ```
+
+Training registers models using `DATABASE_URL`. Ensure its database server is
+running. To use local SQLite during development, set the URL in the terminal
+used for both training and Flask:
+
+```powershell
+$backendPath = (Resolve-Path .\backend).Path.Replace('\', '/')
+$env:DATABASE_URL = "sqlite:///$backendPath/xai_loan.db"
+```
+
+For MySQL, start MySQL and keep the matching URL from `backend/.env` instead.
 
 Both governed model artifacts and their metadata are written under
 `ml/models/saved/`. The binary artifacts and downloaded CSV are ignored by Git.
@@ -245,8 +267,12 @@ unavailable response until a suitable artifact exists.
 Start the backend in one terminal from the repository root:
 
 ```powershell
-backend/.venv/Scripts/Activate.ps1
-python backend/run.py
+$projectPython = ".\backend\.venv\Scripts\python.exe"
+# If backend/.env points to MySQL, set the same SQLite URL used for local
+# training here as well, or start MySQL before launching Flask.
+$backendPath = (Resolve-Path .\backend).Path.Replace('\', '/')
+$env:DATABASE_URL = "sqlite:///$backendPath/xai_loan.db"
+& $projectPython backend/run.py
 ```
 
 The API listens on `http://localhost:5000`; check API reachability with
@@ -257,33 +283,34 @@ Start the frontend in a second terminal:
 
 ```powershell
 cd frontend
-npm ci
-npm run dev
+npm.cmd ci
+npm.cmd run dev
 ```
 
 Open `http://localhost:5173`. Vite proxies `/api` to the backend on port 5000.
-For production frontend verification, use `npm run build`; deployment must
+For production frontend verification, use `npm.cmd run build`; deployment must
 serve the built `frontend/dist` files and route API calls to Flask.
 
 Create a local first admin account after the database is available:
 
 ```powershell
-python database/seeds/seed_admin.py admin@example.com "Admin Name" "a-strong-password"
+& $projectPython database/seeds/seed_admin.py admin@example.com "Admin Name" "a-strong-password"
 ```
 
 ### 6. Current validation commands
 
-Run from the repository root with the backend virtual environment activated:
+Run from the repository root with the project Python path set as shown:
 
 ```powershell
-python -m compileall -q backend ml tests
-python -m pytest tests/backend -v
-python -m pytest tests/ml -v
+$projectPython = ".\backend\.venv\Scripts\python.exe"
+& $projectPython -m compileall -q backend ml tests
+& $projectPython -m pytest tests/backend -v
+& $projectPython -m pytest tests/ml -v
 cd frontend
-npm run lint
-npm run build
-npm run test -- --pool=forks --maxWorkers=1 --minWorkers=1
-npm audit
+npm.cmd run lint
+npm.cmd run build
+npm.cmd run test -- --pool=forks --maxWorkers=1 --minWorkers=1
+npm.cmd audit
 ```
 
 The remaining npm advisories in the checked lockfile require major upgrades
@@ -296,24 +323,26 @@ The optional browser upload smoke test needs Chrome and Playwright installed in
 the active Python environment, plus the frontend dependencies:
 
 ```powershell
-python tests/e2e/document_upload_smoke.py
+$projectPython = ".\backend\.venv\Scripts\python.exe"
+& $projectPython tests/e2e/document_upload_smoke.py
 ```
 
 See [verification documentation](docs/document-verification.md),
 [demo scenarios](DEMO.md), and [testing documentation](docs/testing/README.md)
 for feature-specific details.
 
-### Verification state (2026-10-13)
+### Verification state (2026-10-20)
 
-Frontend lint and production build pass; all 25 frontend tests pass. Python
-bytecode compilation passes. Backend and ML pytest suites could not be run in
-the review environment: it has Python 3.14 with no pytest installed, while this
-project targets Python 3.11. The checkout has no `backend/.env` or active
-`model.joblib` / `transaction_model.joblib` artifacts, so a live database
-connection and end-to-end prediction could not be verified here. Run the setup
-and training commands above before expecting live predictions. `npm audit`
-reports 15 remaining advisories in dependencies whose available fixes require
-major framework upgrades.
+Verified with Python 3.11.9: dependency imports, dataset download (1,000 rows),
+both model training and active model-version registration against local SQLite,
+individual and transaction model inference, Flask app creation, and the
+`/api/health` route (HTTP 200). All 157 backend and ML tests report passed;
+pytest did not exit after reporting 100%, so its final process status could not
+be confirmed. Frontend lint, production build, and all 25 frontend tests pass.
+The configured MySQL server was not running, so
+MySQL-backed registration and production database behavior remain
+unverified. The npm lockfile still has 15 advisories requiring major dependency
+upgrades.
 
 ---
 ## Why "AI Risk Manager"

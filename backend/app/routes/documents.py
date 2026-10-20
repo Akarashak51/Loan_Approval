@@ -111,7 +111,7 @@ def upload_document():
             jsonify(
                 {
                     "success": False,
-                    "message": "File size exceeds the allowed 10 MB limit.",
+                    "message": "File size exceeds the allowed 5 MB limit.",
                 }
             ),
             400,

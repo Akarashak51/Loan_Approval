@@ -3,8 +3,14 @@ Shared configuration/constants for the ML pipeline.
 """
 
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 ML_ROOT = os.path.dirname(os.path.abspath(__file__))
+# Keep direct training commands aligned with Flask's DB and feature flags,
+# while allowing process environment values to override these defaults.
+load_dotenv(Path(ML_ROOT).parent / "backend" / ".env")
 
 DATA_RAW_DIR = os.path.join(ML_ROOT, "data", "raw")
 DATA_PROCESSED_DIR = os.path.join(ML_ROOT, "data", "processed")
