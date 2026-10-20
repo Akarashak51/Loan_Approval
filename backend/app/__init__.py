@@ -1,0 +1,141 @@
+"""
+Application factory for the Explainable AI Loan Approval backend.
+"""
+
+from flask import Flask
+from flask_cors import CORS
+from sqlalchemy import inspect, text
+
+from app.config import get_config
+from app.extensions import db, bcrypt, migrate
+
+
+def create_app(config_name: str | None = None) -> Flask:
+    app = Flask(__name__)
+    app.config.from_object(get_config(config_name))
+
+    CORS(app, origins=app.config.get("CORS_ORIGINS", "*"))
+
+    db.init_app(app)
+    bcrypt.init_app(app)
+    migrate.init_app(app, db)
+
+    # Register routes before create_all: route imports register all model
+    # metadata, including document records, with SQLAlchemy.
+    register_blueprints(app)
+
+    # SQLite is the zero-configuration local-development store.  Production
+    # and MySQL deployments continue to use Flask-Migrate as usual.
+    if app.config.get("DEBUG") and app.config[
+        "SQLALCHEMY_DATABASE_URI"
+    ].startswith("sqlite:"):
+        with app.app_context():
+            db.create_all()
+            _upgrade_local_sqlite_schema()
+
+    register_error_handlers(app)
+
+    return app
+
+
+def _upgrade_local_sqlite_schema() -> None:
+    """Add columns introduced after a local SQLite database was first created.
+
+    ``create_all`` only creates missing tables; it does not update existing
+    tables.  Keep this deliberately additive and SQLite-only so development
+    data remains usable. Production/MySQL schema changes belong in the
+    reference schema and a deployment migration.
+    """
+    required_columns = {
+        "applications": {
+            "public_id": "VARCHAR(20)",
+            "admin_decision": "VARCHAR(20)",
+            "admin_decided_by": "INTEGER",
+            "admin_decided_at": "DATETIME",
+            "admin_feedback": "VARCHAR(1000)",
+            "loan_type": "VARCHAR(40) NOT NULL DEFAULT 'PERSONAL_LOAN'",
+        },
+        "notifications": {"decision_type": "VARCHAR(20)"},
+        "documents": {
+            "application_id": "INTEGER",
+            "document_status": "VARCHAR(20) NOT NULL DEFAULT 'pending'",
+            "reviewed_by": "INTEGER",
+            "reviewed_at": "DATETIME",
+        },
+        "users": {"google_sub": "VARCHAR(255)"},
+    }
+    inspector = inspect(db.engine)
+    existing_tables = set(inspector.get_table_names())
+    with db.engine.begin() as connection:
+        for table, columns in required_columns.items():
+            if table not in existing_tables:
+                continue
+            existing_columns = {
+                column["name"] for column in inspector.get_columns(table)
+            }
+            for column, definition in columns.items():
+                if column not in existing_columns:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE {table} ADD COLUMN {column}"
+                            f" {definition}"
+                        )
+                    )
+
+
+def register_blueprints(app: Flask) -> None:
+    from app.routes.health import health_bp
+    from app.routes.auth import auth_bp
+    from app.routes.applicants import applicants_bp
+    from app.routes.predictions import predictions_bp
+    from app.routes.explanations import explanations_bp
+    from app.routes.counterfactuals import counterfactuals_bp
+    from app.routes.fairness import fairness_bp
+    from app.routes.analytics import analytics_bp
+    from app.routes.documents import documents_bp
+    from app.routes.merchants import merchants_bp
+    from app.routes.portfolio import portfolio_bp
+    from app.routes.models import models_bp
+    from app.routes.admin_reviews import admin_reviews_bp
+    from app.routes.notifications import notifications_bp
+
+    app.register_blueprint(health_bp, url_prefix="/api")
+    app.register_blueprint(auth_bp, url_prefix="/api")
+    app.register_blueprint(applicants_bp, url_prefix="/api")
+    app.register_blueprint(predictions_bp, url_prefix="/api")
+    app.register_blueprint(explanations_bp, url_prefix="/api")
+    app.register_blueprint(counterfactuals_bp, url_prefix="/api")
+    app.register_blueprint(fairness_bp, url_prefix="/api")
+    app.register_blueprint(analytics_bp, url_prefix="/api")
+    app.register_blueprint(documents_bp, url_prefix="/api")
+    app.register_blueprint(merchants_bp, url_prefix="/api")
+    app.register_blueprint(portfolio_bp, url_prefix="/api")
+    app.register_blueprint(models_bp, url_prefix="/api")
+    app.register_blueprint(admin_reviews_bp, url_prefix="/api")
+    app.register_blueprint(notifications_bp, url_prefix="/api")
+
+
+def register_error_handlers(app: Flask) -> None:
+    from flask import jsonify
+
+    @app.errorhandler(404)
+    def not_found(_e):
+        return jsonify({"error": "Not found"}), 404
+
+    @app.errorhandler(500)
+    def server_error(_e):
+        return jsonify({"error": "Internal server error"}), 500
+
+    @app.errorhandler(413)
+    def upload_too_large(_e):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "message": (
+                        "Upload request exceeds the allowed size limit."
+                    ),
+                }
+            ),
+            413,
+        )

@@ -1,0 +1,46 @@
+# --- Environment / secrets ---
+.env
+backend/private_uploads/
+.env.local
+backend/.env
+frontend/.env
+frontend/.env.local
+
+# --- Node / frontend ---
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
+# --- Python / backend ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+backend/venv/
+backend/.venv/
+*.egg-info/
+.pytest_cache/
+
+# --- ML artifacts (large files — see ml/models/README.md for regeneration steps) ---
+ml/models/saved/*.joblib
+ml/models/saved/*.pkl
+ml/data/raw/*.csv
+ml/data/processed/*.csv
+
+# --- Database ---
+*.sqlite3
+*.db
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# --- Logs ---
+*.log
+logs/
