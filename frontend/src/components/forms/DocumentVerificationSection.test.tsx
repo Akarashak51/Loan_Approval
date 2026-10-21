@@ -40,6 +40,24 @@ describe('Document verification', () => {
     expect(screen.queryByText(/Document verification:/)).toBeNull();
     expect(screen.queryByText('Missing document')).toBeNull();
   });
+  it('shows masked extracted fields and cross-document check results in the report', async () => {
+    vi.mocked(documentApi.report).mockResolvedValue({ ...report,
+      documents: { aadhaar: {
+        documentType: 'AADHAAR_CARD', status: 'VERIFIED',
+        extractedInformation: { name: 'Asha Example', dob: '1995-01-15', address: '12 Sample Street', aadhaar: '********7779' },
+        checks: [{ name: 'aadhaar_checksum', slot: 'aadhaar', status: 'PASS', reason: 'Aadhaar number checksum is valid.', evidence: {} }],
+      } },
+      checks: [...report.checks, { name: 'identity_name', slot: 'cross_document', status: 'FAIL', reason: 'PAN holder name does not match Aadhaar.', evidence: {} }],
+    });
+    render(<DocumentVerificationSection />);
+    await ready();
+    const details = screen.getByRole('region', { name: 'Extracted document details' });
+    expect(within(details).getByText('12 Sample Street')).toBeTruthy();
+    expect(within(details).getByText('********7779')).toBeTruthy();
+    expect(within(details).getByText('PASS:')).toBeTruthy();
+    expect(within(details).getByText('FAIL:')).toBeTruthy();
+    expect(within(details).getByText('PAN holder name does not match Aadhaar.')).toBeTruthy();
+  });
   it('shows wrong-slot reasons returned by upload', async () => {
     const rejected = documentResult('AADHAAR_CARD', 'REJECTED', ['Wrong document type.']);
     vi.mocked(documentApi.upload).mockImplementation(async () => {
@@ -68,7 +86,7 @@ describe('Document verification', () => {
     expect(screen.queryByText(/Poppler|Tesseract/)).toBeNull();
   });
 
-  it.each([ocrNotice, 'OCR requires Tesseract. Install Tesseract and add it to PATH.'])('shows one global capability notice after a real backend failure: %s', async (notice) => {
+  it.each([ocrNotice, 'OCR requires Tesseract. Install Tesseract and add it to PATH.', 'Text extraction failed: OCR requires Tesseract. Install Tesseract and add it to PATH. The original upload was stored for review.'])('shows one global capability notice after a real backend failure: %s', async (notice) => {
     vi.mocked(documentApi.upload).mockRejectedValue({ response: { data: { message: notice } } });
     render(<DocumentVerificationSection />);
     await ready();
@@ -127,7 +145,7 @@ describe('Document verification', () => {
     expect(within(card('PAN Card')).getByText('Uploaded')).toBeTruthy();
   });
 
-  it('shows Uploaded while keeping an identity mismatch visible for review', async () => {
+  it('shows NEEDS_REVIEW while keeping an identity mismatch visible', async () => {
     const uploaded = {
       ...documentResult('SALARY_SLIP', 'UPLOADED'),
       verification: {
@@ -139,30 +157,28 @@ describe('Document verification', () => {
     vi.mocked(documentApi.pending).mockResolvedValue([uploaded]);
     render(<DocumentVerificationSection />);
     await ready();
-    expect(within(card('Salary slip')).getByText('Uploaded')).toBeTruthy();
+    expect(within(card('Salary slip')).getByText('NEEDS_REVIEW')).toBeTruthy();
     expect(within(card('Salary slip')).getByText(/administrator review is recommended/)).toBeTruthy();
   });
 
-  it('shows Aadhaar approved with a green check after upload despite a missing-name warning', async () => {
+  it('does not mark Aadhaar approved when the name is missing', async () => {
     vi.mocked(documentApi.pending).mockResolvedValue([documentResult(
-      'AADHAAR_CARD', 'UPLOADED', ['Document holder name could not be extracted; administrator review is recommended.'],
+      'AADHAAR_CARD', 'NEEDS_REVIEW', ['Document holder name could not be extracted; administrator review is recommended.'],
     )]);
     render(<DocumentVerificationSection />);
-    await waitFor(() => expect(within(card('Aadhaar')).getByText('Aadhaar approved')).toBeTruthy());
-    expect(within(card('Aadhaar')).getByText('Aadhaar approved').className).toContain('bg-green-100');
-    expect(within(card('Aadhaar')).getByText('Aadhaar approved').querySelector('svg')).toBeTruthy();
-    expect(within(card('Aadhaar')).queryByText(/administrator review is recommended/)).toBeNull();
+    await waitFor(() => expect(within(card('Aadhaar')).getByText('NEEDS_REVIEW')).toBeTruthy());
+    expect(within(card('Aadhaar')).queryByText('Aadhaar approved')).toBeNull();
+    expect(within(card('Aadhaar')).getByText(/administrator review is recommended/)).toBeTruthy();
   });
 
-  it('shows PAN Card approved with a green check after upload despite a missing-name warning', async () => {
+  it('does not mark PAN approved when the name is missing', async () => {
     vi.mocked(documentApi.pending).mockResolvedValue([documentResult(
-      'PAN_CARD', 'UPLOADED', ['Document holder name could not be extracted; administrator review is recommended.'],
+      'PAN_CARD', 'NEEDS_REVIEW', ['Document holder name could not be extracted; administrator review is recommended.'],
     )]);
     render(<DocumentVerificationSection />);
-    await waitFor(() => expect(within(card('PAN Card')).getByText('PAN Card approved')).toBeTruthy());
-    expect(within(card('PAN Card')).getByText('PAN Card approved').className).toContain('bg-green-100');
-    expect(within(card('PAN Card')).getByText('PAN Card approved').querySelector('svg')).toBeTruthy();
-    expect(within(card('PAN Card')).queryByText(/administrator review is recommended/)).toBeNull();
+    await waitFor(() => expect(within(card('PAN Card')).getByText('NEEDS_REVIEW')).toBeTruthy());
+    expect(within(card('PAN Card')).queryByText('PAN Card approved')).toBeNull();
+    expect(within(card('PAN Card')).getByText(/administrator review is recommended/)).toBeTruthy();
   });
 
   it('keeps failed upload feedback outside an empty card', async () => {

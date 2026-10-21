@@ -194,6 +194,11 @@ $projectPython = ".\backend\.venv\Scripts\python.exe"
 
 Use `$projectPython` for Python commands in PowerShell. This avoids using a
 different global Python and does not require PowerShell script activation.
+The commands shown in earlier setup examples such as `python ml/...` or
+`python backend/run.py` use whichever Python happens to be first on `PATH`;
+that interpreter will fail with `No module named dotenv`, `joblib`, or
+`flask_cors` if it does not have this project's dependencies. Install into and
+run from `backend/.venv` as shown here.
 
 macOS/Linux:
 
@@ -204,12 +209,25 @@ python -m pip install --upgrade pip
 python -m pip install -r backend/requirements.txt
 ```
 
-Digital PDFs work without system OCR. Scanned PDFs require Tesseract on `PATH`
-(`tesseract --version`); set `TESSERACT_CMD` in `backend/.env` if needed.
+Digital PDFs work without system OCR. Image-backed PDFs with short or
+incomplete embedded text now also run Tesseract OCR and combine both text
+sources, which covers hybrid/scanned Aadhaar PDFs. Scanned PDFs require
+Tesseract. The app
+checks `PATH` and the standard Windows install folders automatically; if needed,
+set `TESSERACT_CMD` in `backend/.env` to either the executable or its install
+folder, then restart Flask. For example:
+
+```text
+TESSERACT_CMD=C:/Program Files/Tesseract-OCR
+```
+
 PDFium is supplied by the Python dependency; Poppler is not required. Uploads
 are stored under `backend/private_uploads` with a 5 MB per-file limit. Aadhaar
 extractions retain a masked summary, not the full identity number. Restart Flask
-after changing `backend/.env`.
+after changing `backend/.env`. Existing uploads are not reprocessed when OCR
+settings change; remove and upload them again to create a fresh extraction and
+verification report. For Aadhaar address extraction, include the back side in
+the same multi-page PDF when the address is printed there.
 
 ### 3. Initialize the database
 
@@ -311,6 +329,14 @@ npm.cmd run lint
 npm.cmd run build
 npm.cmd run test -- --pool=forks --maxWorkers=1 --minWorkers=1
 npm.cmd audit
+```
+
+For the document extraction and report checks alone, run this from the
+repository root:
+
+```powershell
+$projectPython = ".\backend\.venv\Scripts\python.exe"
+& $projectPython -m pytest tests/backend/test_document_pipeline.py -v
 ```
 
 The remaining npm advisories in the checked lockfile require major upgrades

@@ -11,10 +11,10 @@ ROOT = Path(__file__).parent / "documents"
 def sample_texts():
     number = next("99998888777" + str(i) for i in range(10) if verhoeff("99998888777" + str(i)))
     return {
-        "aadhaar": f"SYNTHETIC DEMO - NOT VALID ID\nGovernment of India\nUnique Identification Authority\nName: Asha Example\nDOB: 1995-01-15\nFemale\n{number}",
-        "salary_slip": "SYNTHETIC DEMO\nSalary Slip\nEmployee name: Asha Example\nEmployer: Example Labs\nPay period: 2026-01\nBasic: 40000\nHRA: 10000\nGross: 50000\nDeductions: 5000\nNet Pay: 45000",
+        "aadhaar": f"SYNTHETIC DEMO - NOT VALID ID\nGovernment of India\nUnique Identification Authority\nName: Asha Example\nDOB: 1995-01-15\nFemale\nAddress: 12 Sample Street\nGreen Park\nNew Delhi 110016\n{number}",
+        "salary_slip": "SYNTHETIC DEMO\nSalary Slip\nEmployee name: Asha Example\nDOB: 1995-01-15\nEmployer: Example Labs\nPay period: 2026-01\nBasic: 40000\nHRA: 10000\nGross: 50000\nDeductions: 5000\nNet Pay: 45000",
         "bank_statement": "SYNTHETIC DEMO\nBank Statement\nAccount holder: Asha Example\nIFSC: DEMO0000001\nAccount number: 12345678\nDate Description Debit Credit Balance\n2026-01-01 Opening 0 0 10000\n2026-01-05 Salary_Example_Labs 0 45000 55000\n2026-01-10 EMI 5000 0 50000\n2026-02-05 Salary_Example_Labs 0 45000 95000\n2026-02-10 ATM 10000 0 85000",
-        "pan": "SYNTHETIC DEMO\nIncome Tax Department\nGovernment of India\nPermanent Account Number\nName: Asha Example\nABCDE1234F",
+        "pan": "SYNTHETIC DEMO\nIncome Tax Department\nGovernment of India\nPermanent Account Number\nName: Asha Example\nFather's Name: Example Parent\nDOB: 1995-01-15\nABCDE1234F",
     }
 
 

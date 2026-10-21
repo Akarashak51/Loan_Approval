@@ -20,10 +20,16 @@ Authenticated multipart `POST /api/documents` accepts `slot` (`aadhaar`,
 `pan`, `salary_slip`, `bank_statement`) and `file`. Existing
 `documentType` names map to those slots. File content, not client MIME or filename,
 determines PDF/PNG/JPEG format. Default limits: 5 MiB, 20 PDF pages, 20 megapixels,
-30 seconds per OCR call. OCR requires Tesseract, on PATH or configured using
-`TESSERACT_CMD`. Scanned PDFs use bundled PDFium; Poppler is not required.
+20 seconds per OCR pass. OCR requires Tesseract, on PATH or configured using
+`TESSERACT_CMD` as either an executable path or installation directory. On
+Windows, the app also checks the standard Program Files installation folders.
+Restart Flask after changing the setting. Scanned PDFs use bundled PDFium;
+Poppler is not required.
 Scanned PDF pages render at up to 300 DPI, bounded by the 20-megapixel OCR cap.
-Digital PDFs use pdfplumber. Unreadable inputs produce explicit errors.
+Digital PDFs use pdfplumber. Image-backed PDFs also run OCR when the embedded
+text layer is short or lacks identity markers; both sources are retained so an
+incomplete hidden text layer cannot suppress visible fields. Unreadable inputs
+produce explicit errors.
 
 The upload path uses lightweight distinctive text markers only to reject an
 obvious mismatch between the document and its selected slot. It has no
@@ -31,10 +37,23 @@ confidence-score gate. If OCR cannot read the page or no distinctive type
 marker is found, the file is stored for review rather than rejected. This is a
 demo usability check, not document authentication.
 
-Holder-name matching is a soft check: a clear mismatch or missing name marks
-the document for administrator review, but does not block upload. DOB, issuer
-markers, Aadhaar checksum, PAN identifier extraction, metadata, and salary
-arithmetic are informational/review signals, not upload gates.
+The upload is retained for review when a field or consistency check fails; the
+API does not treat OCR output as proof of identity. Aadhaar extraction includes
+name, DOB, gender, address and a masked Aadhaar number. The number is checked
+with its Verhoeff checksum; an invalid checksum is a FAIL. PAN extraction
+includes name, father's name, DOB when printed, and a masked PAN identifier.
+Salary slips expose the extracted employee, DOB when printed, employer, pay
+period, pay components, gross, deductions and net pay. Bank statements expose
+masked account details and parsed transactions. Missing optional fields are
+reported as not extracted and are not silently inferred.
+If OCR fails or produces too little text to read reliably, the extraction check
+is FAIL and the document remains stored with NEEDS_REVIEW; upload a clearer,
+higher-resolution image to replace it.
+
+For Aadhaar address extraction, include the side on which the address is
+printed. If it is on the reverse, combine clear front and back scans into one
+multi-page PDF and upload that as the Aadhaar document; uploading a second file
+to the same slot replaces the active slot document.
 
 Raster OCR applies EXIF orientation, grayscale/autocontrast normalization,
 small-angle deskewing, bounded upscaling for small images, and sharpening using
@@ -61,7 +80,7 @@ for shared or production accounts.
 
 For a real browser smoke test, install `playwright` into the backend environment
 and have Chrome and Tesseract installed, then run
-`python tests/e2e/document_upload_smoke.py` from the repository root. It starts
+`& $projectPython tests/e2e/document_upload_smoke.py` from the repository root. It starts
 isolated Flask/Vite servers and an in-memory database, uploads synthetic text
 PDFs, a PNG, and a scanned PDF, and checks that PAN-in-Aadhaar is rejected and
 application submission is disabled. It does not use existing accounts or files.
@@ -82,19 +101,26 @@ supersede the active slot by increasing audit ID without deleting prior evidence
 Each application uses only its own staged uploads, preventing a later replacement
 from changing historical reports.
 
-When a holder name is extracted, it is compared with the logged-in user's
-registered name using RapidFuzz and conservative initial/token normalization.
-`DOCUMENT_NAME_THRESHOLD` defaults to 88/100. A mismatch or missing name is a
-review warning. Duplicate-file hashes, DOB differences, metadata, salary
-arithmetic, and balance reconciliation are not upload rejection gates.
+The Aadhaar name is compared with the logged-in user's registered name using
+RapidFuzz and conservative initial/token normalization. Other extracted holder
+names are compared to the Aadhaar identity when available. DOB is compared
+across documents when both values can be extracted and normalized. A clear name
+or DOB mismatch is FAIL; an unavailable value is WARN. `DOCUMENT_NAME_THRESHOLD`
+defaults to 88/100. Salary arithmetic and Aadhaar checksum failures are also
+FAIL. These findings keep an upload reviewable but do not discard it.
 
-An obvious slot-type mismatch is REJECTED. Other consistency failures/warnings
-produce NEEDS_REVIEW; accepted documents retain the `UPLOADED` state while admin
-review flags remain visible. These checks do not authenticate the issuer.
+An obvious slot-type mismatch is REJECTED. Any other unresolved WARN or FAIL
+produces NEEDS_REVIEW. A document is VERIFIED only when its checks pass. Reports
+include each document's extracted fields, per-document check results and
+cross-document checks; the frontend renders those fields and marks FAIL results
+in red. Aadhaar, PAN and bank account identifiers are masked in report output.
+These checks do not authenticate the issuer.
 
 ## Reports and decision policy
 
-`GET /api/documents/report` returns the current user's staged report.
+`GET /api/documents/report` returns the current user's staged report, including
+the masked identity anchor, extracted details for each uploaded slot, checks,
+bank statement details and the overall verdict.
 `GET /api/documents/applications/<id>/report` returns the saved application report;
 only the owner or staff may read it. All routes require JWT authentication.
 The `/documents` frontend page (also embedded in `/apply`) has four upload slots,
@@ -171,19 +197,20 @@ The normal governance gate still applies; a failed model is not saved. All bank
 history features are immutable for DiCE; existing age/sex/nationality protections
 remain. Serving supplies bank values from persisted extraction, not request JSON.
 
-## Validation recorded during implementation
+## Validation
 
-- Python backend/ML suite: 112 tests passed on Python 3.12 in the available
-  Windows environment. Source uses Python 3.11-compatible syntax; Python 3.11
-  execution remains a deployment check.
-- Frontend: 10 Vitest tests passed; TypeScript/Vite production build passed.
-- TF-IDF classifier: 40/40 correct (1.000 accuracy) on the generated synthetic
-  template holdout. Templates overlap the training family; this is not real-world
-  accuracy or an independent layout evaluation.
-- Digital-PDF and normalized CSV paths, missing-Tesseract errors, and SQLite
-  migration upgrade/downgrade were exercised. Tesseract is not installed in this
-  environment, so actual OCR was not run. A live MySQL migration and the optional
-  bank-augmented credit model retraining were not run.
+- Backend and ML pytest suites reached 100% progress with no failed tests
+  reported in the test-failure capture. Pytest remained alive during Windows
+  process shutdown, so its final exit code was not available in this run.
+- Frontend ESLint passed, the TypeScript/Vite production build passed, and all
+  27 Vitest tests passed.
+- Tesseract was present in the standard Windows install folder but configured as
+  a folder path. The OCR loader now accepts that path form. A scanned Aadhaar
+  PNG and PAN PNG were processed through the upload API; name, DOB, address,
+  masked identifiers, Aadhaar checksum and cross-document name/DOB checks passed
+  on synthetic samples. Real documents may have different image quality/layout.
+- A live MySQL migration and optional bank-augmented model retraining were not
+  run.
 
 ## Extraction and deployment limitations
 

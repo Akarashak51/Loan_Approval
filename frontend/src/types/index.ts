@@ -254,7 +254,8 @@ export interface TransactionDecisionReasoning {
   probabilityAdjustment: number;
   factors: Array<{ feature: string; label: string; value: number | null; adjustment: number; reason: string }>;
 }
-export interface VerificationReport { verdict: 'VERIFIED' | 'NEEDS_REVIEW' | 'REJECTED'; checks: VerificationCheck[]; reasons: string[]; identity: { name?: string; dob?: string; aadhaar?: string }; features: Record<string, number | null>; bankStatement?: BankStatementDetail | null; canSubmit?: boolean; submissionErrors?: string[]; historicalPolicy?: boolean; }
+export interface VerificationReportDocument { documentType: DocumentType; status: DocumentStatus; extractedInformation: Record<string, unknown>; checks: VerificationCheck[]; }
+export interface VerificationReport { verdict: 'VERIFIED' | 'NEEDS_REVIEW' | 'REJECTED'; checks: VerificationCheck[]; reasons: string[]; identity: { name?: string; dob?: string; aadhaar?: string; address?: string; gender?: string }; documents?: Record<string, VerificationReportDocument>; features: Record<string, number | null>; bankStatement?: BankStatementDetail | null; canSubmit?: boolean; submissionErrors?: string[]; historicalPolicy?: boolean; }
 export interface DocumentVerification { documentType: DocumentType; status: DocumentStatus; confidence: number; extractedInformation: Record<string, unknown>; mismatches: string[]; verificationMessage: string; verifiedAt?: string; }
 export interface DocumentRecord { id: number; documentType: DocumentType; status: DocumentStatus; filename: string; uploadedAt?: string; verification?: DocumentVerification | null; documentStatus?: 'pending' | 'approved' | 'rejected'; reviewedBy?: number | null; reviewedAt?: string | null; }
 export interface UserNotification { id: number; application_id: number | null; message: string; type: string; decision_type: 'approved' | 'rejected' | null; is_read: boolean; created_at: string | null; }

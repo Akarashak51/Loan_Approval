@@ -12,7 +12,9 @@ const DOCUMENT_SLOTS: Array<{ type: DocumentType; title: string; required: boole
 const SLOTS = DOCUMENT_SLOTS;
 
 function isOcrCapabilityNotice(reason: string) {
-  return /^(Scanned PDFs require Poppler and Tesseract on PATH\.?|OCR requires Tesseract\. Install Tesseract and add it to PATH\.?)$/i.test(reason.replace(/\s+/g, ' ').trim());
+  const normalized = reason.replace(/\s+/g, ' ').trim();
+  return /Scanned PDFs require Poppler and Tesseract on PATH\.?/i.test(normalized) ||
+    /OCR requires Tesseract\. Install Tesseract and add it to PATH\./i.test(normalized);
 }
 
 function hasVerificationResult(document?: DocumentRecord) {
@@ -104,17 +106,15 @@ export default function DocumentVerificationSection({ onReadinessChange }: { onR
     <div className="mt-5 grid gap-4 md:grid-cols-2">{SLOTS.map(({ type, title, required }) => {
       const document = documents[type];
       const hasResult = hasVerificationResult(document);
-      const approved = document?.status === 'VERIFIED' || document?.verification?.status === 'VERIFIED' || (
-        document?.status === 'UPLOADED' && !!document.verification && Array.isArray(document.verification.mismatches) && document.verification.mismatches.length > 0 && !['REJECTED', 'NEEDS_REVIEW', 'FAILED'].includes(document.verification.status)
-      );
+      const approved = document?.status === 'VERIFIED' || document?.verification?.status === 'VERIFIED';
       const status = !document ? 'NOT UPLOADED' : !document.verification ? 'Uploaded' : document.verification.status === 'VERIFIED'
         ? 'VERIFIED'
         : document.verification.status === 'REJECTED'
           ? 'REJECTED'
           : document.verification.status === 'NEEDS_REVIEW'
-            ? document.status === 'NEEDS_REVIEW' ? 'NEEDS_REVIEW' : 'Uploaded'
+            ? 'NEEDS_REVIEW'
             : document.verification.status === 'FAILED'
-              ? document.status === 'FAILED' ? 'FAILED' : 'Uploaded'
+              ? 'FAILED'
               : document.status === 'VERIFYING' ? 'VERIFYING' : 'Uploaded';
       const identity = required;
       return <article key={type} className="rounded-lg border p-4">
@@ -130,5 +130,27 @@ export default function DocumentVerificationSection({ onReadinessChange }: { onR
         {hasResult && !approved && document.verification?.mismatches.filter(reason => !isOcrCapabilityNotice(reason) && reason !== errors[type]).map((reason, i) => <p key={i} className="mt-2 text-xs text-amber-800">{reason}</p>)}
       </article>;
     })}</div>
+    {report?.documents && Object.keys(report.documents).length > 0 && <section aria-label="Extracted document details" className="mt-6 space-y-4">
+      <h3 className="text-base font-semibold text-slate-800">Extracted details and verification checks</h3>
+      {Object.entries(report.documents).map(([slot, result]) => <article key={slot} className="rounded-lg border border-slate-200 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h4 className="font-semibold text-slate-800">{result.documentType.replaceAll('_', ' ')}</h4>
+          <span className={`rounded px-2 py-1 text-xs font-semibold ${result.status === 'VERIFIED' ? 'bg-green-100 text-green-800' : result.status === 'REJECTED' || result.status === 'FAILED' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-900'}`}>{result.status.replaceAll('_', ' ')}</span>
+        </div>
+        <dl className="mt-3 grid gap-2 sm:grid-cols-2">
+          {Object.entries(result.extractedInformation).map(([key, value]) => <div key={key} className="rounded bg-slate-50 p-2">
+            <dt className="text-xs font-medium capitalize text-slate-500">{key.replaceAll('_', ' ')}</dt>
+            <dd className="break-words text-sm text-slate-800">{value === null || value === undefined || value === '' ? 'Not extracted' : typeof value === 'object' ? JSON.stringify(value) : String(value)}</dd>
+          </div>)}
+        </dl>
+        <ul className="mt-3 space-y-1">
+          {result.checks.map((item, index) => <li key={`${item.name}-${index}`} className={`text-xs ${item.status === 'PASS' ? 'text-green-800' : item.status === 'FAIL' ? 'text-red-700' : 'text-amber-800'}`}><strong>{item.status}:</strong> {item.reason}</li>)}
+        </ul>
+      </article>)}
+      {report.checks.filter(item => item.slot === 'cross_document').length > 0 && <div className="rounded-lg border border-sky-200 bg-sky-50 p-4">
+        <h4 className="font-semibold text-slate-800">Cross-document checks</h4>
+        <ul className="mt-2 space-y-1">{report.checks.filter(item => item.slot === 'cross_document').map((item, index) => <li key={`${item.name}-${index}`} className={`text-xs ${item.status === 'PASS' ? 'text-green-800' : item.status === 'FAIL' ? 'text-red-700' : 'text-amber-800'}`}><strong>{item.status}:</strong> {item.reason}</li>)}</ul>
+      </div>}
+    </section>}
   </section>;
 }

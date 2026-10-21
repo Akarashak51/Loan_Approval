@@ -104,7 +104,7 @@ def identity_checks(fields, anchor, threshold=88):
             result(
                 "identity_name",
                 "WARN",
-                "Document holder name could not be extracted.",
+                "Document holder name could not be extracted; administrator review is recommended.",
             )
         ]
     score = name_score(fields["name"], anchor["name"])

@@ -55,10 +55,39 @@ def test_ocr_field_parser_accepts_common_recognition_punctuation():
 
 
 def test_aadhaar_name_parser_handles_unlabeled_name_before_dob():
-    from app.services.document_pipeline import aadhaar_dob, aadhaar_name
+    from app.services.document_pipeline import aadhaar_dob, aadhaar_gender, aadhaar_name
     text = 'Government of India\nUnique Identification Authority\nAsha Example\nDOB: 1995-01-15\nFemale'
     assert aadhaar_name(text) == 'Asha Example'
     assert aadhaar_dob('Asha Example\nD0B\n15/01/1995\nFemale') == '15/01/1995'
+    assert aadhaar_gender('DOB 15/01/1995  Female  address') == 'Female'
+
+
+def test_aadhaar_name_parser_trims_adjacent_fields_and_ignores_headers():
+    from app.services.document_pipeline import aadhaar_name
+
+    text = (
+        'Government of India\nUnique Identification Authority\n'
+        'Name: Asha Example DOB: 1995-01-15 Female\n'
+    )
+    assert aadhaar_name(text) == 'Asha Example'
+    assert aadhaar_name(
+        'Government of India\nName\nUnique Identification Authority\n'
+        'Asha Example\nDOB\n15/01/1995'
+    ) == 'Asha Example'
+    assert aadhaar_name('Government of India\nName: TT\nDOB 15/01/1995') is None
+    assert aadhaar_name(
+        'Name: TT\nDOB 15/01/1995\nName: Asha Example', 'Asha Example'
+    ) == 'Asha Example'
+
+
+def test_aadhaar_number_parser_recovers_separated_digits_and_ocr_confusions():
+    from app.services.document_pipeline import aadhaar_number
+
+    # Fictional checksum-valid test values only.
+    assert aadhaar_number('Aadhaar\n9 9 9 9 8 8 8 8 7 7 7 9') == '999988887779'
+    # OCR may read zeroes as O; document context plus the Verhoeff checksum
+    # lets the parser recover this synthetic number without guessing the name.
+    assert aadhaar_number('Unique Identification Authority\n2OOO OOOO OOO9') == '200000000009'
 
 
 def test_pan_parser_handles_separated_label_and_spaced_identifier():
@@ -118,23 +147,18 @@ def test_pan_cannot_pass_aadhaar_slot_even_with_aadhaar_filename(client, documen
     assert response.json['document']['status'] == 'REJECTED'
     checks = {check['name']: check['status'] for check in response.json['checks']}
     assert checks['document_type'] == 'FAIL'
-    assert 'aadhaar_checksum' not in checks
+    assert 'aadhaar_checksum' in checks
     assert 'aadhaar_markers' not in checks
 
 
-@pytest.mark.parametrize('variant', ['Government of India', 'Unique Identification Authority', 'checksum'])
-def test_aadhaar_marker_and_checksum_fields_do_not_block_upload(client, document_headers, variant):
+@pytest.mark.parametrize('variant', ['Government of India', 'Unique Identification Authority'])
+def test_aadhaar_marker_variants_keep_valid_checksum(client, document_headers, variant):
     from reportlab.pdfgen import canvas
     from tests.fixtures.generate_documents import sample_texts
     buffer = BytesIO()
     pdf = canvas.Canvas(buffer)
     text = sample_texts()['aadhaar']
-    if variant == 'checksum':
-        number = re.search(r'\b\d{12}\b', text).group()
-        replacement = number[:-1] + ('0' if number[-1] != '0' else '1')
-        text = text.replace(number, replacement)
-    else:
-        text = text.replace(variant, '')
+    text = text.replace(variant, '')
     for index, line in enumerate(text.splitlines()):
         pdf.drawString(40, 800 - index * 22, line)
     pdf.save()
@@ -143,9 +167,20 @@ def test_aadhaar_marker_and_checksum_fields_do_not_block_upload(client, document
     })
     assert response.status_code == 201
     assert response.json['document']['status'] == 'VERIFIED'
-    checks = {check['name'] for check in response.json['checks']}
-    assert 'aadhaar_checksum' not in checks
+    checks = {check['name']: check['status'] for check in response.json['checks']}
+    assert checks['aadhaar_checksum'] == 'PASS'
     assert 'aadhaar_markers' not in checks
+
+
+def test_invalid_aadhaar_checksum_is_reported_as_failure(client, document_headers):
+    response = send(client, document_headers, 'aadhaar', 'invalid_aadhaar.pdf')
+    assert response.status_code == 201
+    assert response.json['document']['status'] == 'NEEDS_REVIEW'
+    checksum = next(c for c in response.json['checks'] if c['name'] == 'aadhaar_checksum')
+    assert checksum['status'] == 'FAIL'
+    report = client.get('/api/documents/report', headers=document_headers).json
+    assert report['verdict'] == 'NEEDS_REVIEW'
+    assert report['documents']['aadhaar']['extractedInformation']['aadhaar'] == '********7770'
 
 
 def test_aadhaar_accepts_issuer_and_dob_ocr_punctuation(client, document_headers):
@@ -171,6 +206,78 @@ def test_aadhaar_accepts_issuer_and_dob_ocr_punctuation(client, document_headers
     extracted = response.json['document']['verification']['extractedInformation']
     assert extracted['name'] == 'Asha Example'
     assert extracted['dob'] == '1995-01-15'
+    assert extracted['address'] == '12 Sample Street, Green Park, New Delhi 110016'
+    assert extracted['aadhaar'] == '********7779'
+
+
+def test_scanned_aadhaar_and_pan_images_extract_and_match(client, document_headers):
+    from PIL import Image, ImageDraw
+    from ml.documents.extraction import ExtractionError, _ocr
+    from tests.fixtures.generate_documents import sample_texts
+
+    try:
+        _ocr(Image.new('RGB', (10, 10), 'white'))
+    except ExtractionError as exc:
+        if 'OCR requires Tesseract' in str(exc):
+            pytest.skip('Tesseract is not installed or configured.')
+        raise
+
+    aadhaar_response = client.post('/api/documents', headers=document_headers, data={
+        'slot': 'aadhaar',
+        'file': (BytesIO((FIXTURES / 'aadhaar.png').read_bytes()), 'aadhaar.png'),
+    })
+    assert aadhaar_response.status_code == 201
+    aadhaar_fields = aadhaar_response.json['document']['verification']['extractedInformation']
+    assert aadhaar_fields['name'] == 'Asha Example'
+    assert aadhaar_fields['dob'] == '1995-01-15'
+    assert aadhaar_fields['address'] == '12 Sample Street, Green Park, New Delhi 110016'
+    assert aadhaar_fields['aadhaar'] == '********7779'
+
+    image = Image.new('RGB', (1400, 700), 'white')
+    ImageDraw.Draw(image).multiline_text(
+        (60, 50), sample_texts()['pan'], fill='black', spacing=22, font_size=36,
+    )
+    pan_image = BytesIO()
+    image.save(pan_image, format='PNG')
+    pan_response = client.post('/api/documents', headers=document_headers, data={
+        'slot': 'pan', 'file': (BytesIO(pan_image.getvalue()), 'pan.png'),
+    })
+    assert pan_response.status_code == 201
+    pan_fields = pan_response.json['document']['verification']['extractedInformation']
+    assert pan_fields['name'] == 'Asha Example'
+    assert pan_fields['father_name'] == 'Example Parent'
+    assert pan_fields['dob'] == '1995-01-15'
+    assert pan_fields['pan'] == '******234F'
+    assert any(
+        item['name'] == 'identity_name' and item['status'] == 'PASS'
+        for item in pan_response.json['checks']
+    )
+    assert any(
+        item['name'] == 'identity_dob' and item['status'] == 'PASS'
+        for item in pan_response.json['checks']
+    )
+
+
+def test_pan_image_with_too_little_text_is_flagged_for_reupload(
+    client, document_headers, monkeypatch,
+):
+    from PIL import Image
+    from ml.documents import extraction
+
+    monkeypatch.setattr(extraction, '_ocr', lambda _: 'ABC 123')
+    image = BytesIO()
+    Image.new('RGB', (100, 63), 'white').save(image, format='PNG')
+    response = client.post('/api/documents', headers=document_headers, data={
+        'slot': 'pan', 'file': (BytesIO(image.getvalue()), 'pan.png'),
+    })
+
+    assert response.status_code == 201
+    assert response.json['document']['status'] == 'NEEDS_REVIEW'
+    extraction_check = next(
+        item for item in response.json['checks'] if item['name'] == 'text_extraction'
+    )
+    assert extraction_check['status'] == 'FAIL'
+    assert 'higher-resolution image' in extraction_check['reason']
 
 
 def test_aadhaar_missing_dob_is_review_not_upload_rejection(client, document_headers):
@@ -214,7 +321,7 @@ def test_identity_mismatch_and_reuse(client, app, document_headers):
     wrong = send(client, document_headers, "salary_slip", "mismatched_salary.pdf")
     assert wrong.status_code == 201
     assert wrong.json['document']['status'] == 'NEEDS_REVIEW'
-    assert any(c["name"] == "identity_name" and c["status"] == "WARN" for c in wrong.json["checks"])
+    assert any(c["name"] == "identity_name" and c["status"] == "FAIL" for c in wrong.json["checks"])
     response = client.post("/api/auth/register", json={"full_name": "Asha Example", "email": "another@example.test", "password": "strong-password-123"})
     other = {"Authorization": "Bearer " + response.json["token"]}
     # Identical/same-identity uploads are permitted in the demo workflow.
@@ -227,7 +334,7 @@ def test_identity_mismatch_and_reuse(client, app, document_headers):
         assert VerificationReport.query.count() == 3
     copied = send(client, other, 'salary_slip', 'mismatched_salary.pdf')
     assert copied.status_code == 201
-    assert any(c['name'] == 'identity_name' and c['status'] == 'WARN' for c in copied.json['checks'])
+    assert any(c['name'] == 'identity_name' and c['status'] == 'FAIL' for c in copied.json['checks'])
 
 
 @pytest.mark.parametrize("decision,verdict,expected", [("APPROVE", "REJECTED", "REVIEW"),
@@ -275,6 +382,54 @@ def test_report_auth_and_complete_documents(client, document_headers):
     report = client.get('/api/documents/report', headers=document_headers)
     assert report.json['verdict'] == 'VERIFIED'
     assert report.json['features']['avg_monthly_credits'] == 45000
+    extracted = report.json['documents']
+    assert extracted['aadhaar']['extractedInformation']['address'] == (
+        '12 Sample Street, Green Park, New Delhi 110016'
+    )
+    assert extracted['aadhaar']['extractedInformation']['aadhaar'] == '********7779'
+    assert extracted['aadhaar']['extractedInformation']['gender'] == 'Female'
+    assert report.json['identity']['gender'] == 'Female'
+    assert extracted['pan']['extractedInformation']['name'] == 'Asha Example'
+    assert extracted['pan']['extractedInformation']['pan'] == '******234F'
+    assert extracted['pan']['extractedInformation']['father_name'] == 'Example Parent'
+    assert extracted['pan']['extractedInformation']['dob'] == '1995-01-15'
+    salary = extracted['salary_slip']['extractedInformation']
+    assert (salary['employer'], salary['gross'], salary['deductions'], salary['net_pay']) == (
+        'Example Labs', 50000, 5000, 45000,
+    )
+    assert salary['dob'] == '1995-01-15'
+    assert any(
+        item['name'] == 'identity_dob' and item['status'] == 'PASS'
+        for item in extracted['pan']['checks']
+    )
+    bank = report.json['bankStatement']
+    assert bank['accountHolder'] == 'Asha Example'
+    assert bank['accountNumber'] == '****5678'
+    assert bank['ifsc'] == 'DEMO0000001'
+
+
+def test_mismatched_document_dob_fails_cross_document_check(client, document_headers):
+    from reportlab.pdfgen import canvas
+    from tests.fixtures.generate_documents import sample_texts
+
+    assert send(client, document_headers, 'aadhaar').status_code == 201
+    text = sample_texts()['salary_slip'].replace('1995-01-15', '1994-01-15')
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer)
+    for index, line in enumerate(text.splitlines()):
+        pdf.drawString(40, 800 - index * 22, line)
+    pdf.save()
+    response = client.post('/api/documents', headers=document_headers, data={
+        'slot': 'salary_slip', 'file': (BytesIO(buffer.getvalue()), 'salary.pdf'),
+    })
+    assert response.status_code == 201
+    dob_check = next(
+        item for item in response.json['checks'] if item['name'] == 'identity_dob'
+    )
+    assert dob_check['status'] == 'FAIL'
+    report = client.get('/api/documents/report', headers=document_headers).json
+    assert report['verdict'] == 'NEEDS_REVIEW'
+    assert report['documents']['salary_slip']['status'] == 'NEEDS_REVIEW'
 
 
 def test_csv_transactions_persist(client, app, document_headers):
@@ -341,14 +496,18 @@ def test_submission_override_snapshot_and_report_privacy(client, app, document_h
     assert client.get(f'/api/documents/applications/{application_id}/report', headers=headers).status_code == 404
 
 
-def test_invalid_slot_and_size_but_not_checksum(client, app, document_headers):
+def test_invalid_slot_size_and_invalid_checksum(client, app, document_headers):
     assert send(client, document_headers, 'unknown', 'aadhaar.pdf').status_code == 400
     app.config['MAX_DOCUMENT_SIZE_BYTES'] = 10
     assert send(client, document_headers, 'aadhaar').status_code == 400
     app.config['MAX_DOCUMENT_SIZE_BYTES'] = 5 * 1024 * 1024
     response = send(client, document_headers, 'aadhaar', 'invalid_aadhaar.pdf')
     assert response.status_code == 201
-    assert response.json['document']['status'] == 'VERIFIED'
+    assert response.json['document']['status'] == 'NEEDS_REVIEW'
+    assert any(
+        item['name'] == 'aadhaar_checksum' and item['status'] == 'FAIL'
+        for item in response.json['checks']
+    )
 
 
 @pytest.mark.parametrize('loan_type', ['PERSONAL_LOAN', 'CAR_LOAN', 'BIKE_LOAN', 'HOME_LOAN', 'BUSINESS_CAPITAL', 'EDUCATION_LOAN'])
@@ -449,7 +608,7 @@ def test_remove_auth_and_review_locks(client, app, document_headers):
     assert path.exists()
 
 
-@pytest.mark.parametrize('name,status', [('Asha Example', 'PASS'), ('Rohan Different', 'WARN'), ('', 'WARN')])
+@pytest.mark.parametrize('name,status', [('Asha Example', 'PASS'), ('Rohan Different', 'FAIL'), ('', 'WARN')])
 def test_bank_header_identity_and_private_transactions(client, document_headers, name, status):
     send(client, document_headers, 'aadhaar')
     text = f'Bank Statement\nAccount holder name: {name}\nAccount number: 9876543210\nBank name: Example Bank\nBranch: Central\nIFSC: DEMO0000001\ndate,description,debit,credit,balance\n2026-01-01,Salary,0,45000,45000\n2026-01-02,EMI,5000,0,40000\n'
@@ -467,6 +626,8 @@ def test_bank_header_identity_and_private_transactions(client, document_headers,
     assert len(details['transactions']) == 2
     if status == 'WARN':
         assert 'administrator review is recommended' in identity['reason'].lower()
+    if status == 'FAIL':
+        assert 'does not match the Aadhaar identity' in identity['reason']
     assert '9876543210' not in str(report)
     url = f"/api/documents/{response.json['document']['id']}/bank-statement"
     assert client.get(url, headers=document_headers).json == details
@@ -510,8 +671,8 @@ def test_every_slot_flags_a_different_account_holder_for_review(client, app, slo
     assert response.status_code == 201
     assert response.json['document']['status'] == 'NEEDS_REVIEW'
     identity = next(check for check in response.json['checks'] if check['name'] == 'identity_name')
-    assert identity['status'] == 'WARN'
-    assert identity['reason'].endswith('administrator review is recommended.')
+    assert identity['status'] == 'FAIL'
+    assert 'does not match the registered account name' in identity['reason']
 
 
 def test_report_persists_review_status_for_bank_without_transactions(client, document_headers):

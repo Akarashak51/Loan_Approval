@@ -5,7 +5,8 @@ backend/private_uploads/
 backend/.env
 frontend/.env
 frontend/.env.local
-
+Glass-main/private_uploads
+private_uploads
 # --- Node / frontend ---
 node_modules/
 frontend/node_modules/

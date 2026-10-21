@@ -23,6 +23,8 @@ from ml.documents.checks import metadata_checks  # noqa: E402
 from ml.documents.identity import AADHAAR  # noqa: E402
 from ml.documents.identity import mask_identifiers  # noqa: E402
 from ml.documents.identity import name_score  # noqa: E402
+from ml.documents.identity import verhoeff  # noqa: E402
+from ml.documents.checks import identity_checks  # noqa: E402
 from ml.documents.extraction import ExtractionError  # noqa: E402
 from ml.documents.extraction import detect_type  # noqa: E402
 from ml.documents.extraction import extract  # noqa: E402
@@ -184,15 +186,66 @@ def field(text, labels):
     return None
 
 
-def aadhaar_name(text):
-    """Use the unlabeled name line immediately before Aadhaar DOB/YOB."""
-    labeled = field(
-        text,
-        r"name(?:\s+of\s+(?:the\s+)?(?:resident|holder))?|holder name",
+def _aadhaar_name_candidate(value):
+    """Return a clean Aadhaar name candidate, rejecting adjacent OCR fields."""
+    value = re.split(
+        r"\b(?:d\.?\s*[o0]\.?\s*b\.?|d0b|dob|yob|date of birth|"
+        r"year of birth|gender|sex|address|aadhaar|aadhar|uidai|vid|"
+        r"mobile|phone)\b",
+        value,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    value = re.sub(r"^[\s:;|,<>»•*.-]+|[\s:;|,<>»•*.-]+$", "", value)
+    value = re.sub(r"\s+", " ", value)
+    if not re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,79}", value):
+        return None
+    tokens = value.split()
+    if len(tokens) > 5 or not any(len(token.strip(".'-")) > 1 for token in tokens):
+        return None
+    letters = sum(char.isalpha() for char in value)
+    if letters < 4:
+        return None
+    header_words = {
+        "government", "of", "india", "unique", "identification", "authority",
+        "uidai", "aadhaar", "aadhar", "resident", "enrolment", "enrollment",
+        "male", "female", "gender", "dob", "yob", "date", "birth",
+        "address", "village", "vill", "district", "state", "pincode",
+        "pin", "house", "street", "road", "branch", "mobile", "phone",
+    }
+    if {token.strip(".'-").casefold() for token in tokens} & header_words:
+        return None
+    return value
+
+
+def aadhaar_name(text, expected_name=None):
+    """Prefer an explicit name label, then the name line immediately before DOB."""
+    label = re.compile(
+        r"^[ \t]*(?:name(?:\s+of\s+(?:the\s+)?(?:resident|holder))?|"
+        r"holder name)[ \t]*[:=;|]?[ \t]*(.*)$",
+        re.I,
     )
-    if labeled:
-        return labeled
     lines = [line.strip() for line in text.splitlines()]
+    candidates = []
+    for index, line in enumerate(lines):
+        match = label.fullmatch(line)
+        if not match:
+            continue
+        candidate = _aadhaar_name_candidate(match.group(1))
+        if candidate:
+            candidates.append(candidate)
+        if not match.group(1).strip():
+            for following in lines[index + 1:index + 4]:
+                candidate = _aadhaar_name_candidate(following)
+                if candidate:
+                    candidates.append(candidate)
+                    break
+                if following and re.search(
+                    r"\b(?:dob|yob|address|gender|sex|aadhaar|uidai)\b",
+                    following,
+                    re.I,
+                ):
+                    break
     identity_anchor = re.compile(
         r"(?:d\.?\s*[o0]\.?\s*b\.?|d0b|yob|dob|date of birth|"
         r"year of birth|\bgender\b|\bmale\b|\bfemale\b)",
@@ -207,13 +260,70 @@ def aadhaar_name(text):
         if not identity_anchor.search(line):
             continue
         for candidate in reversed(lines[max(0, index - 4):index]):
-            if (
-                len(candidate) >= 3
-                and re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,79}", candidate)
-                and not header.search(candidate)
+            name = _aadhaar_name_candidate(candidate)
+            if name and not header.search(candidate):
+                candidates.append(name)
+                break
+    # When both Tesseract layouts produce candidates, use the registered name
+    # only to choose between text actually found in OCR; never synthesize it.
+    unique = list(dict.fromkeys(candidates))
+    if expected_name:
+        matching = [
+            (name_score(candidate, expected_name), candidate)
+            for candidate in unique
+        ]
+        matching = [item for item in matching if item[0] >= 88]
+        if matching:
+            return max(matching, key=lambda item: item[0])[1][:150]
+    if not unique:
+        return None
+    return max(
+        unique,
+        key=lambda candidate: (
+            len(candidate.split()) >= 2,
+            min(len(candidate.split()), 3),
+            sum(char.isalpha() for char in candidate),
+        ),
+    )[:150]
+
+
+def aadhaar_number(text):
+    """Read Aadhaar digits despite common OCR confusions and spaced digits.
+
+    Only 12-character candidates are accepted. Checksum-valid candidates win;
+    invalid candidates are retained for review just like exact OCR matches.
+    """
+    confusions = str.maketrans({
+        "O": "0", "Q": "0", "D": "0", "I": "1", "L": "1",
+        "|": "1", "!": "1", "S": "5", "G": "6", "T": "7",
+        "B": "8", "Z": "2",
+    })
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9])([0-9OQDIL|!SGTBZ](?:[ \t-]*[0-9OQDIL|!SGTBZ]){11})"
+        r"(?![A-Za-z0-9])",
+        re.I,
+    )
+    candidates = []
+    for line in text.splitlines():
+        for match in pattern.finditer(line):
+            raw = re.sub(r"[ \t-]", "", match.group(1)).upper()
+            normalized = raw.translate(confusions)
+            # Accept heavy OCR confusion only when the surrounding document
+            # identifies itself as Aadhaar; otherwise require several visible
+            # digits so a word made from O/I/S/B is not treated as an ID.
+            digit_count = sum(char.isdigit() for char in raw)
+            is_aadhaar_document = bool(re.search(
+                r"aadhaar|aadhar|uidai|unique\s+identification", text, re.I
+            ))
+            if digit_count < 3 and not (
+                is_aadhaar_document and verhoeff(normalized)
             ):
-                return mask_identifiers(candidate)[:150]
-    return None
+                continue
+            if re.fullmatch(r"[2-9]\d{11}", normalized):
+                candidates.append(normalized)
+    if not candidates:
+        return None
+    return next((value for value in candidates if verhoeff(value)), candidates[0])
 
 
 def pan_number(text):
@@ -273,6 +383,45 @@ def aadhaar_dob(text):
                 if match:
                     return match.group()
     return None
+
+
+def aadhaar_address(text):
+    """Extract the address block until the next Aadhaar identity field."""
+    lines = text.splitlines()
+    marker = re.compile(r"^[ \t]*address(?:\s+of\s+resident)?[ \t]*[:=;|]?[ \t]*(.*)$", re.I)
+    boundary = re.compile(
+        r"^[ \t]*(?:name(?:\s+of\s+(?:the\s+)?resident)?|"
+        r"dob|d\.?\s*o\.?\s*b\.?|yob|date of birth|year of birth|"
+        r"gender|sex|mobile|phone|email|vid|enrol(?:ment|lment)|"
+        r"government of india|unique identification|uidai)\b[ \t]*[:=;|]?",
+        re.I,
+    )
+    for index, line in enumerate(lines):
+        match = marker.fullmatch(line)
+        if not match:
+            continue
+        parts = [match.group(1).strip()] if match.group(1).strip() else []
+        for candidate in lines[index + 1:index + 10]:
+            value = candidate.strip()
+            if not value:
+                continue
+            if boundary.match(value) or AADHAAR.search(value):
+                break
+            parts.append(value)
+        address = re.sub(r"\s+", " ", ", ".join(parts)).strip(" ,;|")
+        if address:
+            return mask_identifiers(address)[:500]
+    return None
+
+
+def aadhaar_gender(text):
+    labeled = field(text, r"gender|sex")
+    if labeled:
+        return labeled[:30]
+    # OCR frequently places the gender value beside neighboring card text.
+    # Requiring an otherwise-empty line dropped valid values from scanned PDFs.
+    match = re.search(r"\b(male|female|transgender)\b", text, re.I)
+    return match.group(1).title() if match else None
 
 
 def _log_ocr_diagnostics(text, slot, fields, detected_type):
@@ -353,11 +502,12 @@ def obvious_document_type(text):
 def account_identity(fields, registered_name):
     score = name_score(fields.get("name") or "", registered_name or "")
     passed = score >= current_app.config.get("DOCUMENT_NAME_THRESHOLD", 88)
+    extracted = bool(fields.get("name"))
     reason = (
         "Document holder matches your registered account name."
         if passed else
         "The extracted document name does not match the registered account "
-        "name; administrator review is recommended."
+        "name."
     )
     if not fields.get("name"):
         reason = (
@@ -365,7 +515,9 @@ def account_identity(fields, registered_name):
             "review is recommended."
         )
     return check(
-        "identity_name", "PASS" if passed else "WARN", reason,
+        "identity_name",
+        "PASS" if passed else "FAIL" if extracted else "WARN",
+        reason,
         {"score": round(score, 2), "anchor": "registered_account"},
     )
 
@@ -408,9 +560,9 @@ def upload(user, file, slot):
         try:
             text, metadata, tables = extract(data, mime)
             extraction_warning = None
-        except ExtractionError:
+        except ExtractionError as exc:
             text, metadata, tables = "", {}, []
-            extraction_warning = True
+            extraction_warning = str(exc)
     _save_raw_ocr_debug(text, slot)
     transactions = []
     detected_type = obvious_document_type(text)
@@ -434,13 +586,13 @@ def upload(user, file, slot):
     ]
     if extraction_warning:
         checks.append(check(
-            "text_extraction", "WARN",
-            "Text extraction was unavailable; the original upload was "
-            "stored for review.",
+            "text_extraction", "FAIL",
+            f"Text extraction failed: {extraction_warning} The original upload "
+            "was stored for review.",
         ))
     fields: dict[str, object] = {
         "name": (
-            aadhaar_name(text) if slot == "aadhaar" else
+            aadhaar_name(text, user.full_name) if slot == "aadhaar" else
             pan_name(text) if slot == "pan" else field(
                 text,
                 r"name(?:\s+of\s+(?:the\s+)?(?:resident|holder))?|"
@@ -452,21 +604,48 @@ def upload(user, file, slot):
         ),
     }
     if slot == "aadhaar":
-        aadhaar_number = AADHAAR.search(text)
-        if aadhaar_number:
-            fields["aadhaar"] = mask_identifiers(aadhaar_number.group())
+        fields["address"] = aadhaar_address(text)
+        fields["gender"] = aadhaar_gender(text)
+        extracted_aadhaar = aadhaar_number(text)
+        if extracted_aadhaar:
+            fields["aadhaar"] = mask_identifiers(extracted_aadhaar)
+            valid_number = verhoeff(extracted_aadhaar)
+            checks.append(
+                check(
+                    "aadhaar_checksum",
+                    "PASS" if valid_number else "FAIL",
+                    (
+                        "Aadhaar number checksum is valid."
+                        if valid_number
+                        else "Aadhaar number checksum is invalid; verify the number on the source document."
+                    ),
+                )
+            )
+        else:
+            checks.append(
+                check(
+                    "aadhaar_checksum",
+                    "WARN",
+                    "Aadhaar number could not be extracted for validation.",
+                )
+            )
     checks.append(metadata_checks(metadata))
     if slot == "salary_slip":
+        fields["basic"] = amount(text, "basic")
+        fields["hra"] = amount(text, "hra")
+        fields["allowances"] = amount(text, "allowances")
+        fields["bonus"] = amount(text, "bonus")
+        fields["provident_fund"] = amount(text, r"(?:pf|provident fund)")
+        fields["tax"] = amount(text, r"(?:tax|income tax)")
         fields["gross"] = amount(text, "gross")
         fields["deductions"] = amount(text, "deductions")
         fields["net_pay"] = amount(text, "net pay")
         fields["employer"] = field(text, "employer")
         fields["pay_period"] = field(text, "pay period")
         arithmetic = salary_arithmetic(fields)
-        if arithmetic["status"] == "FAIL":
-            arithmetic["status"] = "WARN"
         checks.append(arithmetic)
     if slot == "pan":
+        fields["father_name"] = field(text, r"father(?:'s)?\s+name")
         pan = pan_number(text)
         checks.append(
             check(
@@ -494,6 +673,17 @@ def upload(user, file, slot):
         else:
             fields.update(extract_bank_header(text))
         fields["name"] = fields["account_holder"]
+        checks.append(
+            check(
+                "bank_account_number",
+                "PASS" if fields.get("account_number") else "WARN",
+                (
+                    "Bank account number was extracted and masked."
+                    if fields.get("account_number")
+                    else "Bank account number could not be extracted."
+                ),
+            )
+        )
     _log_ocr_diagnostics(text, slot, fields, detected_type)
     ownership = account_identity(
         fields,
@@ -659,17 +849,36 @@ def build_report(user_id, application_id=None, persist=False):
                 )
             continue
         slot_checks = [c for c in row.checks if c["name"] != "identity_name"]
-        demo_statement = _demo_statement(account) if slot == "bank_statement" else None
-        slot_checks.append(account_identity(
-            row.fields,
-            demo_statement["account_holder"] if demo_statement else account.full_name,
-        ))
+        if slot == "aadhaar":
+            slot_checks.append(account_identity(row.fields, account.full_name))
+        elif anchor_fields and anchor_fields.get("name"):
+            slot_checks.extend(identity_checks(row.fields, anchor_fields))
+        else:
+            slot_checks.append(account_identity(row.fields, account.full_name))
         if slot == "aadhaar" and not row.fields.get("dob"):
             slot_checks.append(
                 check(
                     "identity_dob",
                     "WARN",
                     "Aadhaar DOB could not be extracted.",
+                )
+            )
+        if slot == "aadhaar" and not row.fields.get("address"):
+            slot_checks.append(
+                check(
+                    "aadhaar_address",
+                    "WARN",
+                    "Aadhaar address could not be extracted; include a clear "
+                    "back-side page if the address is printed there.",
+                )
+            )
+        if slot == "aadhaar" and not row.fields.get("gender"):
+            slot_checks.append(
+                check(
+                    "aadhaar_gender",
+                    "WARN",
+                    "Aadhaar gender could not be extracted; upload a clear "
+                    "image of the side containing the gender field.",
                 )
             )
         checks.extend({**c, "slot": slot} for c in slot_checks)
@@ -710,7 +919,28 @@ def build_report(user_id, application_id=None, persist=False):
         "identity": {
             k: v
             for k, v in (anchor_fields or {}).items()
-            if k in {"name", "dob", "aadhaar"}
+            if k in {"name", "dob", "aadhaar", "address", "gender"}
+        },
+        "documents": {
+            slot: {
+                "documentType": SLOTS[slot],
+                "status": (
+                    "REJECTED"
+                    if any(
+                        c.get("name") == "document_type" and c.get("status") == "FAIL"
+                        for c in checks if c.get("slot") == slot
+                    )
+                    else "NEEDS_REVIEW"
+                    if any(
+                        c.get("status") in {"WARN", "FAIL"}
+                        for c in checks if c.get("slot") == slot
+                    )
+                    else "VERIFIED"
+                ),
+                "extractedInformation": row.fields,
+                "checks": [c for c in checks if c.get("slot") == slot],
+            }
+            for slot, row in audits.items()
         },
         "features": (
             audits["bank_statement"].fields.get("bank_features", {})
